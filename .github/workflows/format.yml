@@ -2,9 +2,9 @@ name: Auto Format Code
 
 on:
   push:
-    branches: [master, 'feature/*']
-  pull_request:
-    branches: [master]
+    # Run on all branches so formatting happens on your fork before/during PR
+    branches:
+      - '**'
 
 jobs:
   format:
@@ -15,8 +15,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          # Checkout the PR branch instead of the merge commit
-          ref: ${{ github.head_ref || github.ref_name }}
+          # On push, github.ref is the branch that was pushed
+          ref: ${{ github.ref }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

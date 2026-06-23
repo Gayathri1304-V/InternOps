@@ -125,7 +125,7 @@ async function routes(fastify) {
     if (!valid) {
       return reply.status(400).send({ error: 'Current password is incorrect' });
     }
-    
+
     const newHash = await argon2.hash(newPassword);
 
     await authRepo.updatePassword(req.user.id, newHash);

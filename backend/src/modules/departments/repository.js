@@ -1,4 +1,4 @@
-﻿const pool = require('../../config/db');
+const pool = require('../../config/db');
 
 async function createDepartment(name, createdBy) {
   try {
@@ -30,6 +30,56 @@ async function softDelete(id) {
     'UPDATE departments SET deleted_at=NOW(), updated_at=NOW() WHERE id=$1',
     [id]
   );
+
+  const userCount = Number(rows[0].user_count);
+
+  if (userCount > 0 && !force) {
+    return {
+      success: false,
+      userCount,
+    };
+  }
+
+  if (force) {
+    const result = await pool.query(
+      `
+      DELETE FROM departments
+      WHERE id = $1
+      RETURNING id
+      `,
+      [id]
+    );
+
+    if (result.rowCount === 0) {
+      return {
+        success: false,
+        userCount: 0,
+      };
+    }
+  } else {
+    const result = await pool.query(
+      `
+      UPDATE departments
+      SET deleted_at = NOW(),
+          updated_at = NOW()
+      WHERE id = $1
+      RETURNING id
+      `,
+      [id]
+    );
+
+    if (result.rowCount === 0) {
+      return {
+        success: false,
+        userCount: 0,
+      };
+    }
+  }
+
+  return {
+    success: true,
+    userCount,
+  };
 }
 
 module.exports = { createDepartment, getAll, softDelete };

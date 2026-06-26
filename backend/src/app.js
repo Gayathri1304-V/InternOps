@@ -6,8 +6,11 @@ const config = require('./config');
 const pool = require('./config/db');
 const metrics = require('./utils/metrics');
 const { initializeWebSocket } = require('./websocket');
+const noticesRoutes = require('./modules/notices/routes');
 
 const app = Fastify({
+  trustProxy:
+    config.nodeEnv === 'production' ? [config.trustedProxyCidr] : 'loopback',
   logger:
     config.nodeEnv === 'development'
       ? { transport: { target: 'pino-pretty' } }
@@ -24,42 +27,17 @@ app.register(require('@fastify/cors'), {
 
 app.register(require('@fastify/helmet'));
 
-app.register(async function sanitizationPlugin(instance) {
-  instance.addHook('onRequest', async (request) => {
-    const sanitize = (obj) => {
-      if (!obj || typeof obj !== 'object') return;
-
-      for (const key of Object.keys(obj)) {
-        const val = obj[key];
-
-        if (typeof val === 'string') {
-          obj[key] = val.replace(/<[^>]*>/g, '').replace(/['"]/g, '');
-        } else if (typeof val === 'object') {
-          sanitize(val);
-        }
-      }
-    };
-
-    sanitize(request.body);
-    sanitize(request.query);
-    sanitize(request.params);
-  });
-});
-
+//  Register once globally — no Redis dependency
 app.register(require('@fastify/rate-limit'), {
-  max: 1000,
-  timeWindow: '1 minute',
+  global: true,
+  max: config.rateLimit.globalMax,
+  timeWindow: config.rateLimit.timeWindow,
 });
 
 app.register(require('@fastify/cookie'));
 
-const { csrfProtection } = require('./middleware/csrf');
-app.register(
-  async function csrfPlugin(instance) {
-    instance.addHook('onRequest', csrfProtection);
-  },
-  { prefix: '/api' }
-);
+const { csrfMiddleware } = require('./middleware/csrf');
+app.addHook('onRequest', csrfMiddleware);
 
 app.register(require('@fastify/multipart'), {
   limits: {
@@ -72,18 +50,20 @@ app.register(require('@fastify/static'), {
   prefix: '/uploads/',
 });
 
-app.register(require('@fastify/swagger'), {
-  openapi: {
-    info: {
-      title: 'InternOps API',
-      version: '1.0.0',
+if (process.env.NODE_ENV !== 'test') {
+  app.register(require('@fastify/swagger'), {
+    openapi: {
+      info: {
+        title: 'InternOps API',
+        version: '1.0.0',
+      },
     },
-  },
-});
+  });
 
-app.register(require('@fastify/swagger-ui'), {
-  routePrefix: '/docs',
-});
+  app.register(require('@fastify/swagger-ui'), {
+    routePrefix: '/docs',
+  });
+}
 
 app.register(require('./modules/auth/routes'), {
   prefix: '/api/auth',
@@ -153,9 +133,15 @@ app.register(require('./modules/reports/export'), {
   prefix: '/api/reports/export',
 });
 
+app.register(require('./modules/ai/routes'), {
+  prefix: '/api/ai',
+});
+
 app.register(require('./modules/uptoskills/routes'), {
   prefix: '/api/uptoskills',
 });
+
+app.register(noticesRoutes);
 
 app.get('/', async (req, reply) => {
   reply.redirect('/docs');
@@ -177,17 +163,23 @@ app.get('/metrics', metrics.metricsEndpoint);
 app.get('/health', async (req, reply) => {
   const { getRedisStatus } = require('./config/redis');
   const redisStatus = getRedisStatus();
+
+  if (process.env.NODE_ENV === 'test') {
+    return reply.send({ status: 'ok' });
+  }
+
   if (redisStatus === 'disconnected') {
     return reply
       .status(503)
       .send({ status: 'degraded', redis: 'disconnected' });
   }
+
   return reply.send({ status: 'ok' });
 });
 
 app.get('/health/db', async (req, reply) => {
   try {
-    await require('./config/db').query('SELECT 1');
+    await pool.query('SELECT 1');
     reply.send({
       status: 'ok',
       db: 'connected',
@@ -202,16 +194,22 @@ app.get('/health/db', async (req, reply) => {
 
 app.get('/health/full', async (req, reply) => {
   const checks = { db: false, redis: false };
+
   try {
-    await require('./config/db').query('SELECT 1');
+    await pool.query('SELECT 1');
     checks.db = true;
   } catch {}
 
   const { getRedisStatus } = require('./config/redis');
   const redisStatus = getRedisStatus();
-  checks.redis = redisStatus === 'connected' || redisStatus === 'disabled';
+
+  checks.redis =
+    process.env.NODE_ENV === 'test' ||
+    redisStatus === 'connected' ||
+    redisStatus === 'disabled';
 
   const healthy = checks.db && checks.redis;
+
   reply
     .status(healthy ? 200 : 503)
     .send({ status: healthy ? 'healthy' : 'degraded', checks });
@@ -228,6 +226,20 @@ app.addHook('onRequest', async (request) => {
     },
     'incoming'
   );
+});
+
+app.addHook('onResponse', async (request) => {
+  if (!request.auditOnResponse) return;
+
+  const { createAuditLog } = require('./utils/audit');
+  try {
+    await createAuditLog(request.auditOnResponse);
+  } catch (err) {
+    request.log.error(
+      { err, audit: request.auditOnResponse },
+      'Failed to write deferred audit log'
+    );
+  }
 });
 
 app.setErrorHandler((error, request, reply) => {

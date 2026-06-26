@@ -19,22 +19,32 @@ async function routes(fastify) {
     const query = schema.parse(req.query);
     return repo.get(req.user.id, query);
   });
-
+  // Mark all as read
+  fastify.post('/read-all', { preHandler: [auth] }, async (req) => {
+    await repo.markAllRead(req.user.id);
+    return { success: true };
+  });
+  // Delete all notifications
+  fastify.delete('/all', { preHandler: [auth] }, async (req) => {
+    await repo.deleteAllNotifications(req.user.id);
+    return { success: true };
+  });
   // Mark single as read
   fastify.patch('/:id/read', { preHandler: [auth] }, async (req) => {
     await repo.markRead(req.params.id, req.user.id);
     return { success: true };
   });
 
-  // Mark all as read
-  fastify.post('/read-all', { preHandler: [auth] }, async (req) => {
-    await repo.markAllRead(req.user.id);
-    return { success: true };
-  });
-
   // Delete a notification
-  fastify.delete('/:id', { preHandler: [auth] }, async (req) => {
-    await repo.deleteNotification(req.params.id, req.user.id);
+  fastify.delete('/:id', { preHandler: [auth] }, async (req, reply) => {
+    try {
+      await repo.deleteNotification(req.params.id, req.user.id);
+    } catch (err) {
+      if (err.message && err.message.startsWith('Notification not found')) {
+        return reply.status(404).send({ error: err.message });
+      }
+      throw err;
+    }
     return { success: true };
   });
 
